@@ -12,10 +12,11 @@ using System.Threading.Tasks;
 using System.Linq;
 using System.Runtime.InteropServices.WindowsRuntime;
 using UnityEditor;
+using UnityEngine.Serialization;
 
 public class MainSimulation : MonoBehaviour
 {
-    public static int BucketSize = 128;
+    public static int BucketSize = 256;
     public static float Epsilon = 1e-25f;
     public List<SimulationProperty> m_SimulationProperties = new List<SimulationProperty>();
     public List<Property> m_AgentProperties = new List<Property>();
@@ -24,14 +25,22 @@ public class MainSimulation : MonoBehaviour
     public float[] m_PreviousAges = new float[BucketSize];
     public float[] m_NextAges = new float[BucketSize];
 
-    [Serializable]
+	public enum PropertyType
+	{
+		Float,
+		Int
+	}
+
+	[Serializable]
     public class SimulationProperty
     {
-        public string m_Name;
-        public float m_Value = 0.0f;
-    }
+        public string			m_Name;
+		public PropertyType		m_Type;
+		public float			m_ValueF = 0.0f;
+		public uint				m_ValueI = 0;
+	}
 
-    [Serializable]
+	[Serializable]
     public class PropertyDistribution
     {
         public string m_PropertyFunctionOf;
@@ -76,8 +85,8 @@ public class MainSimulation : MonoBehaviour
 		}
 	}
 
-	public class DependencyArray
-    {
+	public class PopulationDiscretizer
+	{
         public struct   RandomPick
         {
 			public float m_PopulationInCell;
@@ -87,7 +96,7 @@ public class MainSimulation : MonoBehaviour
 		public NativeArray<float>		m_CurveOutput;
         public NativeArray<float>		m_CurrentPopulationDistrib;
 		public List<RandomPick>			m_RandomPicks = new List<RandomPick>();
-//		public NativeArray<RandomPick>	m_RandomPicks;
+		public List<RandomPick>			m_RandomPicksHistory = new List<RandomPick>();
 
 		private NativeArray<float>	m_RestOutput;
 
@@ -105,7 +114,148 @@ public class MainSimulation : MonoBehaviour
 //			m_RandomPicks.Dispose();
 		}
 
-		public void    Update(uint populationCount)
+		private void	_UpdateRandomPicks(float randPickCount, float restSum)
+		{
+			while (m_RandomPicksHistory.Count != 0 && m_RandomPicks.Count < randPickCount)
+			{
+				float	currentRandom = m_RandomPicksHistory[0].m_RandomValue;
+				bool	inserted = false;
+				for (int i = 0; i < m_RandomPicks.Count; ++i)
+				{
+					if (currentRandom <= m_RandomPicks[i].m_RandomValue)
+					{
+						m_RandomPicks.Insert(i, m_RandomPicksHistory[0]);
+						m_RandomPicksHistory.RemoveAt(0);
+						inserted = true;
+						break;
+					}
+				}
+				if (!inserted)
+				{
+					m_RandomPicks.Add(m_RandomPicksHistory[0]);
+					m_RandomPicksHistory.RemoveAt(0);
+				}
+			}
+			// Select the largest gap between 2 samples and add random picks:
+			while (m_RandomPicks.Count < randPickCount)
+			{
+				float previousRandValue = 0.0f;
+				float largestGap = 0.0f;
+				float minRandValue = 0.0f;
+				float maxRandValue = 1.0f;
+				int insertIdx = 0;
+				for (int i = 0; i < m_RandomPicks.Count; ++i)
+				{
+					float currentRandValue = m_RandomPicks[i].m_RandomValue;
+					float gap = currentRandValue - previousRandValue;
+					if (gap >= largestGap)
+					{
+						minRandValue = previousRandValue;
+						maxRandValue = currentRandValue;
+						insertIdx = i;
+						largestGap = gap;
+					}
+					previousRandValue = m_RandomPicks[i].m_RandomValue;
+				}
+				{
+					float gap = 1.0f - previousRandValue;
+					if (gap >= largestGap)
+					{
+						minRandValue = previousRandValue;
+						maxRandValue = 1.0f;
+						insertIdx = m_RandomPicks.Count;
+						largestGap = gap;
+					}
+				}
+				RandomPick randomPick;
+				randomPick = new RandomPick();
+				randomPick.m_RandomValue = UnityEngine.Random.Range(minRandValue, maxRandValue);
+				randomPick.m_PopulationInCell = 0.0f;
+				if (insertIdx == m_RandomPicks.Count)
+					m_RandomPicks.Add(randomPick);
+				else
+					m_RandomPicks.Insert(insertIdx, randomPick);
+			}
+			// Remove random picks
+			// We remove the random pick where there is the most population
+			while (m_RandomPicks.Count > randPickCount)
+			{
+				float maxPopInCell = 0.0f;
+				int maxPopIdx = 0;
+				for (int i = 0; i < m_RandomPicks.Count; ++i)
+				{
+					if (m_RandomPicks[i].m_PopulationInCell >= maxPopInCell)
+					{
+						maxPopInCell = m_RandomPicks[i].m_PopulationInCell;
+						maxPopIdx = i;
+					}
+				}
+				m_RandomPicksHistory.Add(m_RandomPicks[maxPopIdx]);
+				m_RandomPicks.RemoveAt(maxPopIdx);
+			}
+#if false
+				int prevFloorValue = 0;
+				for (int i = 0; i < m_RandomPicks.Count && randPickCount > m_RandomPicks.Count; ++i)
+				{
+					float pickValue = m_RandomPicks[i].m_RandomValue * randPickCount;
+					int floorValue = Mathf.FloorToInt(pickValue + Epsilon);
+
+					if (i < floorValue)
+					{
+						for (int j = 0; j < )
+						float randomPos = (i + UnityEngine.Random.value) / randPickCount;
+						RandomPick randomPick;
+						randomPick = new RandomPick();
+						randomPick.m_RandomValue = randomPos;
+						randomPick.m_PopulationInCell = 0.0f;
+						m_RandomPicks.Insert(i, randomPick);
+						++i;
+					}
+//					if (i > floorValue)
+//					{
+//						m_RandomPicks.RemoveAt(i);
+//						--i;
+//					}
+//					else
+						prevFloorValue = floorValue;
+				}
+				// Add the last random picks:
+				{
+					int idx = Math.Max(0, m_RandomPicks.Count - 1);
+					while (m_RandomPicks.Count < randPickCount)
+					{
+						float randomPos = (idx + UnityEngine.Random.value) / randPickCount;
+						RandomPick randomPick;
+						randomPick = new RandomPick();
+						randomPick.m_RandomValue = randomPos;
+						randomPick.m_PopulationInCell = 0.0f;
+						m_RandomPicks.Add(randomPick);
+						++idx;
+					}
+				}
+			}
+			if (randPickCount < m_RandomPicks.Count)
+			{
+				// Remove random picks
+				// We remove the random pick where there is the most population
+				while (m_RandomPicks.Count != randPickCount)
+				{
+					float maxPopInCell = 0.0f;
+					int maxPopIdx = 0;
+					for (int i = 0; i < m_RandomPicks.Count; ++i)
+					{
+						if (m_RandomPicks[i].m_PopulationInCell >= maxPopInCell)
+						{
+							maxPopInCell = m_RandomPicks[i].m_PopulationInCell;
+							maxPopIdx = i;
+						}
+					}
+					m_RandomPicks.RemoveAt(maxPopIdx);
+				}
+#endif
+			}
+
+			public void    Update(uint populationCount)
         {
 		    float	restSum = 0.0f;
 			uint	curPopulationCount = 0;
@@ -130,6 +280,8 @@ public class MainSimulation : MonoBehaviour
 			if (populationCount < curPopulationCount)
 				randomPickCount = 0;
 			// Update Random Picks
+			_UpdateRandomPicks(randomPickCount, restSum);
+#if false
 			if (randomPickCount < m_RandomPicks.Count)
 			{
 				// Remove random picks
@@ -154,14 +306,10 @@ public class MainSimulation : MonoBehaviour
 				// Add random picks:
 				while (m_RandomPicks.Count != randomPickCount)
 				{
-					RandomPick randomPick;
-					randomPick = new RandomPick();
-					float randomValue = UnityEngine.Random.value;
-					randomPick.m_RandomValue = randomValue;
-					randomPick.m_PopulationInCell = 0.0f;
-					m_RandomPicks.Add(randomPick);
+					_AddRandomPick(restSum);
 				}
 			}
+#endif
 			for (int i = 0; i < m_RandomPicks.Count; ++i)
 			{
                 RandomPick randomPick = m_RandomPicks[i];
@@ -342,7 +490,7 @@ public class MainSimulation : MonoBehaviour
     {
         public string m_Name = "NewProperty";
 		public float[] m_PopulationDistrib;
-        public DependencyArray m_PopulationDistrib2;
+        public PopulationDiscretizer m_PopulationDistribDiscretizer;
         public NativeArray<float> m_PopulationDistribNative;
 		public List<PropertyDistribution> m_Dependencies = new List<PropertyDistribution>();
         public InitializationFunctions m_Initialization = InitializationFunctions.RandomValue;
@@ -360,7 +508,7 @@ public class MainSimulation : MonoBehaviour
 			m_PopulationDistribNative.Dispose();
 			foreach (PropertyDistribution distrib in m_Dependencies)
 				distrib.Destroy();
-			m_PopulationDistrib2.Destroy();
+			m_PopulationDistribDiscretizer.Destroy();
 		}
 
 		public void     Initialize(uint populationCount)
@@ -369,8 +517,8 @@ public class MainSimulation : MonoBehaviour
 			m_PopulationDistribNative = new NativeArray<float>(BucketSize, Allocator.Persistent);
 			m_NewPopulationDistrib = new NativeArray<float>(BucketSize, Allocator.Persistent);
 			m_ParallelDistrib = new NativeArray<float>(BucketSize * JobCount, Allocator.Persistent);
-			m_PopulationDistrib2 = new DependencyArray();
-			m_PopulationDistrib2.Initialize();
+			m_PopulationDistribDiscretizer = new PopulationDiscretizer();
+			m_PopulationDistribDiscretizer.Initialize();
 
 			if (m_Initialization == InitializationFunctions.RandomBool)
 			{
@@ -406,10 +554,10 @@ public class MainSimulation : MonoBehaviour
 					m_PopulationDistribNative[i] = (float)populationCount * valueInBucket;
                 }
             }
-			m_PopulationDistrib2.m_CurveOutput = m_PopulationDistribNative;
-			m_PopulationDistrib2.Update(populationCount);
-			m_PopulationDistrib2.m_CurrentPopulationDistrib.CopyTo(m_PopulationDistrib);
-			m_PopulationDistrib2.m_CurrentPopulationDistrib.CopyTo(m_PopulationDistribNative);
+			m_PopulationDistribDiscretizer.m_CurveOutput = m_PopulationDistribNative;
+			m_PopulationDistribDiscretizer.Update(populationCount);
+			m_PopulationDistribDiscretizer.m_CurrentPopulationDistrib.CopyTo(m_PopulationDistrib);
+			m_PopulationDistribDiscretizer.m_CurrentPopulationDistrib.CopyTo(m_PopulationDistribNative);
 			for (int i = 0; i < BucketSize; ++i)
 				m_NewPopulationDistrib[i] = 0;
 			for (int i = 0; i < BucketSize * JobCount; ++i)
@@ -496,20 +644,17 @@ public class MainSimulation : MonoBehaviour
         public void PostEvaluateChange(uint populationCount)
         {
             s_SimulatePerfMarker.Begin();
-			if (m_Dependencies.Count != 0)
-            {
-				float   popCount = 0.0f;
-				for (int i = 0; i < BucketSize; ++i)
-					popCount += m_NewPopulationDistrib[i];
-				Debug.Assert(Mathf.Abs(popCount - (float)populationCount) < 0.5f);
-				m_PopulationDistribNative.CopyFrom(m_NewPopulationDistrib);
-				for (int i = 0; i < BucketSize; ++i)
-					m_NewPopulationDistrib[i] = 0;
-				m_PopulationDistrib2.m_CurveOutput = m_PopulationDistribNative;
-				m_PopulationDistrib2.Update(populationCount);
-				m_PopulationDistrib2.m_CurrentPopulationDistrib.CopyTo(m_PopulationDistrib);
-				m_PopulationDistrib2.m_CurrentPopulationDistrib.CopyTo(m_PopulationDistribNative);
-			}
+			float   popCount = 0.0f;
+			for (int i = 0; i < BucketSize; ++i)
+				popCount += m_NewPopulationDistrib[i];
+			Debug.Assert(Mathf.Abs(popCount - (float)populationCount) < 0.5f);
+			m_PopulationDistribNative.CopyFrom(m_NewPopulationDistrib);
+			for (int i = 0; i < BucketSize; ++i)
+				m_NewPopulationDistrib[i] = 0;
+			m_PopulationDistribDiscretizer.m_CurveOutput = m_PopulationDistribNative;
+			m_PopulationDistribDiscretizer.Update(populationCount);
+			m_PopulationDistribDiscretizer.m_CurrentPopulationDistrib.CopyTo(m_PopulationDistrib);
+			m_PopulationDistribDiscretizer.m_CurrentPopulationDistrib.CopyTo(m_PopulationDistribNative);
 			s_SimulatePerfMarker.End();
 		}
 	}
@@ -625,7 +770,7 @@ public class MainSimulation : MonoBehaviour
         SimulationProperty populationCount = m_SimulationProperties.Find(x => x.m_Name == "PopulationCount");
         // Initialize Agents Distribution
         for (int i = 0; i < m_AgentProperties.Count; ++i)
-            m_AgentProperties[i].Initialize((uint)populationCount.m_Value);
+            m_AgentProperties[i].Initialize(populationCount.m_ValueI);
         Property age = m_AgentProperties.Find(x => x.m_Name == "Age");
         m_PreviousAges = new float[BucketSize];
         m_NextAges = new float[BucketSize];
@@ -642,13 +787,13 @@ public class MainSimulation : MonoBehaviour
         SimulationProperty populationCount = m_SimulationProperties.Find(x => x.m_Name == "PopulationCount");
         // Update time:
         SimulationProperty speed = m_SimulationProperties.Find(x => x.m_Name == "SimulationSpeed");
-        float simulationStep = Time.deltaTime * speed.m_Value;
+        float simulationStep = Time.deltaTime * speed.m_ValueF;
         SimulationProperty time = m_SimulationProperties.Find(x => x.m_Name == "SimulationTime");
-        float prevTimeValue = time.m_Value;
-        int prevIdxValue = _ValueToBucketIdx(time.m_Value, false);
-        time.m_Value += simulationStep;
-        int nextIdxValue = _ValueToBucketIdx(time.m_Value, false);
-        float lerpRatio = _ValueToBucketIdxMod(time.m_Value);
+        float prevTimeValue = time.m_ValueF;
+        int prevIdxValue = _ValueToBucketIdx(time.m_ValueF, false);
+        time.m_ValueF += simulationStep;
+        int nextIdxValue = _ValueToBucketIdx(time.m_ValueF, false);
+        float lerpRatio = _ValueToBucketIdxMod(time.m_ValueF);
         if (prevIdxValue < nextIdxValue)
 		{
             int idxOffset = nextIdxValue - prevIdxValue;
@@ -661,11 +806,16 @@ public class MainSimulation : MonoBehaviour
         for (int i = 0; i < BucketSize; ++i)
 		{
             float curValue = Mathf.Lerp(m_PreviousAges[i], m_NextAges[i], lerpRatio);
-            age.m_PopulationDistrib[i] = curValue;
+            age.m_PopulationDistribNative[i] = curValue;
         }
-        age.m_PopulationDistribNative.CopyFrom(age.m_PopulationDistrib);
-        // Update Agents Properties:
-        int[]  updatePriority = new int[m_AgentProperties.Count];
+
+		age.m_PopulationDistribDiscretizer.m_CurveOutput = age.m_PopulationDistribNative;
+		age.m_PopulationDistribDiscretizer.Update(populationCount.m_ValueI);
+		age.m_PopulationDistribDiscretizer.m_CurrentPopulationDistrib.CopyTo(age.m_PopulationDistrib);
+		age.m_PopulationDistribDiscretizer.m_CurrentPopulationDistrib.CopyTo(age.m_PopulationDistribNative);
+
+		// Update Agents Properties:
+		int[]  updatePriority = new int[m_AgentProperties.Count];
         for (int i = 0; i < m_AgentProperties.Count; ++i)
             updatePriority[i] = 0;
         _TagPropertiesToUpdate("Age", updatePriority);
@@ -687,12 +837,12 @@ public class MainSimulation : MonoBehaviour
                 JobHandle handle;
                 if (updatePriority[idxToUpdate[i]] == 1) // Meaning there is only the age as dependency
                 {
-                    handle = m_AgentProperties[idxToUpdate[i]].EvaluateChange(m_AgentProperties, (uint)populationCount.m_Value);
+                    handle = m_AgentProperties[idxToUpdate[i]].EvaluateChange(m_AgentProperties, populationCount.m_ValueI);
                     jobs.Add(handle);
 				}
 				else
                 {
-					handle = m_AgentProperties[idxToUpdate[i]].EvaluateChange(m_AgentProperties, (uint)populationCount.m_Value, jobs[jobs.Count - 1]);
+					handle = m_AgentProperties[idxToUpdate[i]].EvaluateChange(m_AgentProperties, populationCount.m_ValueI, jobs[jobs.Count - 1]);
 					jobs[jobs.Count - 1] = handle;
 				}
 
@@ -704,7 +854,7 @@ public class MainSimulation : MonoBehaviour
 		{
 			if (updatePriority[idxToUpdate[i]] > 0)
 			{
-				m_AgentProperties[idxToUpdate[i]].PostEvaluateChange((uint)populationCount.m_Value);
+				m_AgentProperties[idxToUpdate[i]].PostEvaluateChange(populationCount.m_ValueI);
 			}
 		}
 	}

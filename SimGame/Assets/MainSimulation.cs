@@ -36,20 +36,47 @@ public class MainSimulation : MonoBehaviour
     {
         public string m_PropertyFunctionOf;
         public AnimationCurve m_Distribution;
-        public NativeArray<float> m_PrecomputeCurve;
-        public float m_StdDev = 0.01f;
+        public NativeArray<float>	m_PrecomputeCurve;
+		public NativeArray<float>	m_PrecomputeNormalDistribution;
+		public NativeArray<float>	m_PrecomputeNormalDistributionSum;
+		public float m_StdDev = 0.01f;
 
         public void Init()
 		{
             m_PrecomputeCurve = new NativeArray<float>(BucketSize, Allocator.Persistent);
             for (int i = 0; i < BucketSize; ++i)
-			{
                 m_PrecomputeCurve[i] = Mathf.Clamp01(m_Distribution.Evaluate(_BucketIdxToValue(i)));
-            }
+			m_PrecomputeNormalDistribution = new NativeArray<float>(BucketSize * 2, Allocator.Persistent);
+			m_PrecomputeNormalDistributionSum = new NativeArray<float>(BucketSize * 2, Allocator.Persistent);
+			float stdDev = Mathf.Max(Epsilon, m_StdDev);
+			float normalDistribSum = 0.0f;
+			for (int i = 0; i < BucketSize * 2; ++i)
+			{
+				// We could use the _CumulativeDistributionFunction here but it is less precise around 1.0f
+				// And it is more intuitive to scale the distribution curve instead of having large values at minimum and maximum
+				float normalDistribValue = _NormalDistributionFunction(0, stdDev, _BucketIdxToValue(i) - 1.0f);
+				m_PrecomputeNormalDistribution[i] = normalDistribValue;
+				normalDistribSum += normalDistribValue;
+			}
+			float normalDistribSumTmp = 0.0f;
+			for (int i = 0; i < BucketSize * 2; ++i)
+			{
+				float	curNormalDistrib = m_PrecomputeNormalDistribution[i] / normalDistribSum;
+				m_PrecomputeNormalDistribution[i] = curNormalDistrib;
+				normalDistribSumTmp += curNormalDistrib;
+				m_PrecomputeNormalDistributionSum[i] = normalDistribSumTmp;
+			}
 		}
-    }
 
-    public class DependencyArray
+		public void Destroy()
+		{
+			m_PrecomputeCurve.Dispose();
+			m_PrecomputeNormalDistribution.Dispose();
+			m_PrecomputeNormalDistributionSum.Dispose();
+		}
+	}
+
+	public class DependencyArray
     {
         public struct   RandomPick
         {
@@ -57,58 +84,54 @@ public class MainSimulation : MonoBehaviour
 			public float m_RandomValue;
 		}
 
-		public NativeArray<float>   m_CurveOutput;
-		public NativeArray<float>   m_PreviousPopulationDistrib = new NativeArray<float>(BucketSize, Allocator.Persistent);
-        public NativeArray<float>   m_CurrentPopulationDistrib = new NativeArray<float>(BucketSize, Allocator.Persistent);
-		public List<RandomPick>     m_RandomPicks = new List<RandomPick>();
-		public List<RandomPick>     m_RandomPicksHistory = new List<RandomPick>();
-		public NativeArray<float>   m_RestOutput;
-		public float                m_RestSum = 0.0f;
+		public NativeArray<float>		m_CurveOutput;
+        public NativeArray<float>		m_CurrentPopulationDistrib;
+		public List<RandomPick>			m_RandomPicks = new List<RandomPick>();
+//		public NativeArray<RandomPick>	m_RandomPicks;
 
-		public void    Update()
+		private NativeArray<float>	m_RestOutput;
+
+		public void		Initialize()
+		{
+			m_CurrentPopulationDistrib = new NativeArray<float>(BucketSize, Allocator.Persistent);
+			m_RestOutput = new NativeArray<float>(BucketSize, Allocator.Persistent);
+//			m_RandomPicks = new NativeArray<RandomPick>(BucketSize, Allocator.Persistent);
+		}
+
+		public void		Destroy()
+		{
+			m_CurrentPopulationDistrib.Dispose();
+			m_RestOutput.Dispose();
+//			m_RandomPicks.Dispose();
+		}
+
+		public void    Update(uint populationCount)
         {
-            // We accumulate the rest of the population per cell % 1
-			m_RestOutput = new NativeArray<float>(BucketSize, Allocator.TempJob);
-		    m_RestSum = 0.0f;
-            float curveSum = 0.0f;
+		    float	restSum = 0.0f;
+			uint	curPopulationCount = 0;
+
 			for (int i = 0; i < BucketSize; ++i)
 			{
-                float rest = m_CurveOutput[i] - Mathf.Floor(m_CurveOutput[i]);
-				m_CurrentPopulationDistrib[i] = Mathf.Floor(m_CurveOutput[i]);
+				float	populationInCell = m_CurveOutput[i];
+				if (Mathf.Abs(populationInCell - Mathf.Round(populationInCell)) < 0.0001f) // Float precision error
+					populationInCell = Mathf.Round(populationInCell);
+				curPopulationCount += (uint)populationInCell;
+				float	rest = Mathf.Max(0.0f, populationInCell - Mathf.Floor(populationInCell));
+				m_CurrentPopulationDistrib[i] = Mathf.Floor(populationInCell);
                 if (i == 0)
 					m_RestOutput[i] = rest;
                 else
 					m_RestOutput[i] = m_RestOutput[i - 1] + rest;
-				m_RestSum += rest;
-                curveSum += m_CurveOutput[i];
+				restSum += rest;
 			}
             // Keep the random picks in a list of index
-            int randomPickCount = Mathf.FloorToInt(m_RestSum + 0.5f);
+            uint randomPickCount = populationCount - curPopulationCount;
+			Debug.Assert(populationCount >= curPopulationCount);
+			if (populationCount < curPopulationCount)
+				randomPickCount = 0;
 			// Update Random Picks
 			if (randomPickCount < m_RandomPicks.Count)
 			{
-#if false
-                // +1 on the rest of the largest values
-				while (Mathf.FloorToInt(m_RestSum + 0.5f) != randomPickCount)
-				{
-					float maxPopInCell = 0.0f;
-					int maxPopIdx = 0;
-					for (int i = 0; i < BucketSize; ++i)
-					{
-						if (m_CurveOutput[i] >= maxPopInCell)
-						{
-							maxPopInCell = m_CurveOutput[i];
-							maxPopIdx = i;
-						}
-					}
-                    m_CurrentPopulationDistrib[maxPopIdx] -= 1;
-					for (int i = maxPopIdx; i < BucketSize; ++i)
-					{
-						m_RestOutput[maxPopIdx] += 1.0f;
-					}
-                    m_RestSum += 1.0f;
-				}
-#else
 				// Remove random picks
 				// We remove the random pick where there is the most population
     			while (m_RandomPicks.Count != randomPickCount)
@@ -123,10 +146,8 @@ public class MainSimulation : MonoBehaviour
                             maxPopIdx = i;
     					}
     				}
-                    m_RandomPicksHistory.Add(m_RandomPicks[maxPopIdx]);
 					m_RandomPicks.RemoveAt(maxPopIdx);
     			}
-#endif
 			}
 			else if (randomPickCount > m_RandomPicks.Count)
 			{
@@ -134,53 +155,28 @@ public class MainSimulation : MonoBehaviour
 				while (m_RandomPicks.Count != randomPickCount)
 				{
 					RandomPick randomPick;
-					if (m_RandomPicksHistory.Count != 0)
-                    {
-						randomPick = m_RandomPicksHistory[0];
-                        m_RandomPicksHistory.RemoveAt(0);
-					}
-                    else
-                    {
-						randomPick = new RandomPick();
-
-                        float randomValue = UnityEngine.Random.value * m_RestSum;
-						randomPick.m_RandomValue = randomValue;
-						float curCurveInt = 0.0f;
-
-                        // Here we convert the picked sample value to a curve integral
-						for (int j = 0; j < BucketSize; ++j)
-						{
-							curCurveInt += m_CurveOutput[j];
-							if (m_RestOutput[j] >= randomValue)
-							{
-								float randValue = UnityEngine.Random.Range(curCurveInt - m_CurveOutput[j], curCurveInt);
-								randomPick.m_RandomValue = randValue / curveSum;
-								break;
-							}
-						}
-						randomPick.m_PopulationInCell = 0.0f;
-					}
+					randomPick = new RandomPick();
+					float randomValue = UnityEngine.Random.value;
+					randomPick.m_RandomValue = randomValue;
+					randomPick.m_PopulationInCell = 0.0f;
 					m_RandomPicks.Add(randomPick);
 				}
 			}
 			for (int i = 0; i < m_RandomPicks.Count; ++i)
 			{
                 RandomPick randomPick = m_RandomPicks[i];
-				float curCurveInt = 0.0f;
 
 				for (int j = 0; j < BucketSize; ++j)
 				{
-                    curCurveInt += m_CurveOutput[j];
-					if (curCurveInt >= randomPick.m_RandomValue * curveSum)
+					if (m_RestOutput[j] >= randomPick.m_RandomValue * restSum)
 					{
 						randomPick.m_PopulationInCell = m_CurrentPopulationDistrib[j];
 						m_CurrentPopulationDistrib[j] += 1;
+						m_RandomPicks[i] = randomPick;
 						break;
 					}
 				}
-				m_RandomPicks[i] = randomPick;
 			}
-			m_RestOutput.Dispose();
 		}
     }
 
@@ -188,23 +184,28 @@ public class MainSimulation : MonoBehaviour
 	{
         NormalDistribution,
         ConstantValue,
-        RandomValue
+		RandomValue,
+		RandomBool
 	}
 
-    public struct NormalDistribParallel : IJob
+	public struct NormalDistribParallel : IJob
     {
-        [ReadOnly]
-        public NativeArray<float> m_PrecomputedNormalDistribution;
-        [ReadOnly]
-        public NativeArray<float> m_PrecomputedDependencyCurve;
-        [ReadOnly]
-        public NativeArray<float> m_DependencyPopulationDistrib;
 		[ReadOnly]
-        public float m_InvNormalPDFRangeToZero;
-        [ReadOnly]
-        public int m_StartIdx;
+		public NativeArray<float>	m_PrecomputedNormalDistribution;
 		[ReadOnly]
-		public int m_StopIdx;
+		public NativeArray<float>	m_PrecomputedNormalDistributionSum;
+		[ReadOnly]
+		public float				m_StdDev;
+		[ReadOnly]
+        public NativeArray<float>	m_PrecomputedDependencyCurve;
+        [ReadOnly]
+        public NativeArray<float>	m_DependencyPopulationDistrib;
+		[ReadOnly]
+        public float				m_InvNormalPDFRangeToZero;
+        [ReadOnly]
+        public int					m_StartIdx;
+		[ReadOnly]
+		public int					m_StopIdx;
 
 		[NativeDisableContainerSafetyRestriction]
         public NativeSlice<float> m_OutputDistribution;
@@ -215,33 +216,45 @@ public class MainSimulation : MonoBehaviour
             {
                 float curveValue = m_PrecomputedDependencyCurve[i];
                 float populationDistrib = m_DependencyPopulationDistrib[i];
+				if (populationDistrib == 0.0f)
+					continue;
                 int normalDistribIdxStart = _ValueToBucketIdx(curveValue - m_InvNormalPDFRangeToZero);
                 int normalDistribIdxStop = _ValueToBucketIdx(curveValue + m_InvNormalPDFRangeToZero);
-                int normalDistribStartIdx = (int)((1.0f - curveValue) * BucketSize);
-                float previousValue = 0.0f;
-                for (int k = normalDistribIdxStart; k <= normalDistribIdxStop; ++k)
-                {
-                    float cumulativeValue = (k == normalDistribIdxStop) ? 1.0f : m_PrecomputedNormalDistribution[normalDistribStartIdx + k];
-                    float valueInBucket = cumulativeValue - previousValue;
-                    previousValue = cumulativeValue;
-                    m_OutputDistribution[k] += populationDistrib * valueInBucket;
-                }
-            }
+				if (normalDistribIdxStart == normalDistribIdxStop)
+				{
+					m_OutputDistribution[normalDistribIdxStart] += populationDistrib;
+				}
+				else
+				{
+					int normalDistribOffsetIdx = (int)((1.0f - curveValue) * BucketSize);
+					float firstCumulativeValue = m_PrecomputedNormalDistributionSum[normalDistribOffsetIdx + normalDistribIdxStart];
+					m_OutputDistribution[normalDistribIdxStart] += populationDistrib * firstCumulativeValue;
+					for (int k = normalDistribIdxStart + 1; k < normalDistribIdxStop; ++k)
+					{
+						float currentValue = m_PrecomputedNormalDistribution[normalDistribOffsetIdx + k];
+						m_OutputDistribution[k] += populationDistrib * currentValue;
+					}
+					float lastCumulativeValue = m_PrecomputedNormalDistributionSum[normalDistribOffsetIdx + normalDistribIdxStop - 1];
+					m_OutputDistribution[normalDistribIdxStop] += populationDistrib * (1.0f - lastCumulativeValue);
+				}
+			}
 
-        }
+		}
     }
 	public struct DependencyNormalDistribParallel : IJob
 	{
 		[ReadOnly]
-		public NativeArray<float> m_PrecomputedNormalDistribution;
+		public NativeArray<float>	m_PrecomputedNormalDistribution;
 		[ReadOnly]
-		public NativeArray<float> m_PrecomputedDependencyCurve;
+		public NativeArray<float>	m_PrecomputedNormalDistributionSum;
 		[ReadOnly]
-		public NativeArray<float> m_DependencyPopulationDistrib;
+		public float				m_PopulationCount;
 		[ReadOnly]
-		public NativeArray<float> m_CurPropertyPopulationDistrib;
+		public NativeArray<float>	m_PrecomputedDependencyCurve;
 		[ReadOnly]
-		public float m_PopulationCount;
+		public NativeArray<float>	m_DependencyPopulationDistrib;
+		[ReadOnly]
+		public NativeArray<float>	m_CurPropertyPopulationDistrib;
 		[ReadOnly]
 		public float m_InvNormalPDFRangeToZero;
 		[ReadOnly]
@@ -267,21 +280,30 @@ public class MainSimulation : MonoBehaviour
 					{
 						// We then apply this percent on all buckets 
 						float populationDistrib = populationPercent * m_DependencyPopulationDistrib[j];
+						if (populationDistrib == 0.0f)
+							continue;
 						// Evaluate the dependency curve
 						float curveValue = m_PrecomputedDependencyCurve[j];
 						// Get the new propery value by multiplying the curve value with the current dependency value
 						float multipliedValue = curveValue * dependencyValue;
 						int normalDistribIdxStart = _ValueToBucketIdx(multipliedValue - m_InvNormalPDFRangeToZero);
 						int normalDistribIdxStop = _ValueToBucketIdx(multipliedValue + m_InvNormalPDFRangeToZero);
-						int normalDistribStartIdx = (int)((1.0f - multipliedValue) * BucketSize);
-						// Then we redistribute the population:
-						float previousValue = 0.0f;
-						for (int k = normalDistribIdxStart; k <= normalDistribIdxStop; ++k)
+						if (normalDistribIdxStart == normalDistribIdxStop)
 						{
-							float cumulativeValue = (k == normalDistribIdxStop) ? 1.0f : m_PrecomputedNormalDistribution[normalDistribStartIdx + k];
-							float valueInBucket = cumulativeValue - previousValue;
-							previousValue = cumulativeValue;
-							m_OutputDistribution[k] += populationDistrib * valueInBucket;
+							m_OutputDistribution[normalDistribIdxStart] += populationDistrib;
+						}
+						else
+						{
+							int normalDistribOffsetIdx = (int)((1.0f - curveValue) * BucketSize);
+							float firstCumulativeValue = m_PrecomputedNormalDistributionSum[normalDistribOffsetIdx + normalDistribIdxStart];
+							m_OutputDistribution[normalDistribIdxStart] += populationDistrib * firstCumulativeValue;
+							for (int k = normalDistribIdxStart + 1; k < normalDistribIdxStop; ++k)
+							{
+								float currentValue = m_PrecomputedNormalDistribution[normalDistribOffsetIdx + k];
+								m_OutputDistribution[k] += populationDistrib * currentValue;
+							}
+							float lastCumulativeValue = m_PrecomputedNormalDistributionSum[normalDistribOffsetIdx + normalDistribIdxStop - 1];
+							m_OutputDistribution[normalDistribIdxStop] += populationDistrib * (1.0f - lastCumulativeValue);
 						}
 					}
 				}
@@ -325,11 +347,11 @@ public class MainSimulation : MonoBehaviour
 		public List<PropertyDistribution> m_Dependencies = new List<PropertyDistribution>();
         public InitializationFunctions m_Initialization = InitializationFunctions.RandomValue;
         public float m_InitializationValue = 0.0f;
-        public float m_InitializationStdDev = 1.0f;
+		public float m_InitializationStdDev = 1.0f;
+		public float m_DrawScale = 1.0f;
 
-        private NativeArray<float>          m_NewPopulationDistrib;
+		private NativeArray<float>          m_NewPopulationDistrib;
         private NativeArray<float>          m_ParallelDistrib;
-		private List<NativeArray<float>>    m_ToDispose;
 
         public void     Destroy()
         {
@@ -337,29 +359,37 @@ public class MainSimulation : MonoBehaviour
             m_ParallelDistrib.Dispose();
 			m_PopulationDistribNative.Dispose();
 			foreach (PropertyDistribution distrib in m_Dependencies)
-				distrib.m_PrecomputeCurve.Dispose();
+				distrib.Destroy();
+			m_PopulationDistrib2.Destroy();
 		}
 
-		public void     Initialize(float populationCount)
+		public void     Initialize(uint populationCount)
 		{
-			m_PopulationDistrib2 = new DependencyArray();
 			m_PopulationDistrib = new float[BucketSize];
-			m_ToDispose = new List<NativeArray<float>>();
 			m_PopulationDistribNative = new NativeArray<float>(BucketSize, Allocator.Persistent);
 			m_NewPopulationDistrib = new NativeArray<float>(BucketSize, Allocator.Persistent);
 			m_ParallelDistrib = new NativeArray<float>(BucketSize * JobCount, Allocator.Persistent);
+			m_PopulationDistrib2 = new DependencyArray();
+			m_PopulationDistrib2.Initialize();
 
-			if (m_Initialization == InitializationFunctions.RandomValue)
-            {
-                for (int i = 0; i < BucketSize; ++i)
-					m_PopulationDistribNative[i] = populationCount / BucketSize;
-            }
-            else if (m_Initialization == InitializationFunctions.ConstantValue)
+			if (m_Initialization == InitializationFunctions.RandomBool)
+			{
+				for (int i = 0; i < BucketSize; ++i)
+					m_PopulationDistribNative[i] = 0.0f;
+				m_PopulationDistribNative[0] = (float)populationCount / 2.0f;
+				m_PopulationDistribNative[BucketSize - 1] = (float)populationCount / 2.0f;
+			}
+			else if (m_Initialization == InitializationFunctions.RandomValue)
+			{
+				for (int i = 0; i < BucketSize; ++i)
+					m_PopulationDistribNative[i] = (float)populationCount / BucketSize;
+			}
+			else if (m_Initialization == InitializationFunctions.ConstantValue)
             {
                 for (int i = 0; i < BucketSize; ++i)
 					m_PopulationDistribNative[i] = 0.0f;
                 float initializationValue = Mathf.Clamp01(m_InitializationValue);
-				m_PopulationDistribNative[(int)(initializationValue * (BucketSize - 1))] = populationCount;
+				m_PopulationDistribNative[(int)(initializationValue * (BucketSize - 1))] = (float)populationCount;
             }
             else
             {
@@ -373,11 +403,11 @@ public class MainSimulation : MonoBehaviour
                     float valueInBucket = cumulativeValue - previousValue;
 
                     previousValue = cumulativeValue;
-					m_PopulationDistribNative[i] = populationCount * valueInBucket;
+					m_PopulationDistribNative[i] = (float)populationCount * valueInBucket;
                 }
             }
 			m_PopulationDistrib2.m_CurveOutput = m_PopulationDistribNative;
-			m_PopulationDistrib2.Update();
+			m_PopulationDistrib2.Update(populationCount);
 			m_PopulationDistrib2.m_CurrentPopulationDistrib.CopyTo(m_PopulationDistrib);
 			m_PopulationDistrib2.m_CurrentPopulationDistrib.CopyTo(m_PopulationDistribNative);
 			for (int i = 0; i < BucketSize; ++i)
@@ -390,7 +420,7 @@ public class MainSimulation : MonoBehaviour
 
         static int JobCount = 12;
         static readonly ProfilerMarker s_SimulatePerfMarker = new ProfilerMarker(ProfilerCategory.Ai, "PostEvaluateChange");
-        public JobHandle     EvaluateChange(List<Property> properties, float populationCount, JobHandle jobDep = new JobHandle())
+        public JobHandle     EvaluateChange(List<Property> properties, uint populationCount, JobHandle jobDep = new JobHandle())
 		{
 			JobHandle lastJobDependency = jobDep;
 
@@ -400,19 +430,9 @@ public class MainSimulation : MonoBehaviour
 
 				// First dependency
 				{
-					NativeArray<float> normalDistrib = new NativeArray<float>(BucketSize * 2, Allocator.TempJob);
 					PropertyDistribution firstDependency = m_Dependencies[0];
-                    float stdDev = Mathf.Max(Epsilon, firstDependency.m_StdDev);
-
-					m_ToDispose.Add(normalDistrib);
-					for (int i = 0; i < BucketSize * 2; ++i)
-                    {
-                        float cdfSamplingCursor = _BucketIdxToValue(i) - 1.0f;
-                        float distrib = _CumulativeDistributionFunction(0.0f, stdDev, cdfSamplingCursor);
-                        normalDistrib[i] = distrib;
-                    }
-                    // Compute a normal distribution around the curve value for the first dependency
-                    Property dependentProp = properties.Find(x => x.m_Name == firstDependency.m_PropertyFunctionOf);
+					// Compute a normal distribution around the curve value for the first dependency
+					Property dependentProp = properties.Find(x => x.m_Name == firstDependency.m_PropertyFunctionOf);
                     if (dependentProp != null)
                     {
                         for (int i = 0; i < JobCount; ++i)
@@ -420,20 +440,22 @@ public class MainSimulation : MonoBehaviour
                             NormalDistribParallel job = new NormalDistribParallel();
                             job.m_PrecomputedDependencyCurve = firstDependency.m_PrecomputeCurve;
                             job.m_DependencyPopulationDistrib = dependentProp.m_PopulationDistribNative;
-                            job.m_PrecomputedNormalDistribution = normalDistrib;
-                            job.m_InvNormalPDFRangeToZero = _InverseNormalPDFSize(Epsilon, stdDev);
+							job.m_PrecomputedNormalDistribution = firstDependency.m_PrecomputeNormalDistribution;
+							job.m_PrecomputedNormalDistributionSum = firstDependency.m_PrecomputeNormalDistributionSum;
+							job.m_StdDev = Mathf.Max(Epsilon, firstDependency.m_StdDev);
+                            job.m_InvNormalPDFRangeToZero = _InverseNormalPDFSize(Epsilon, job.m_StdDev);
                             job.m_StartIdx = i * (BucketSize / JobCount);
                             job.m_StopIdx = i + 1 == JobCount ? BucketSize : (i + 1) * (BucketSize / JobCount);
 							job.m_OutputDistribution = m_ParallelDistrib.Slice(i * BucketSize, BucketSize);
                             handles[i] = job.Schedule(lastJobDependency);
-                        }
+						}
 						{
                             MergeDistribs job = new MergeDistribs();
                             job.m_JobCount = JobCount;
                             job.m_JobOutputs = m_ParallelDistrib;
                             job.m_FinalOutput = m_NewPopulationDistrib;
 							lastJobDependency = job.Schedule(JobHandle.CombineDependencies(handles));
-							//mergeJobHandle.Complete();
+							// lastJobDependency.Complete();
 						}
                     }
                 }
@@ -443,28 +465,16 @@ public class MainSimulation : MonoBehaviour
 				{
 					PropertyDistribution curDependency = m_Dependencies[depIdx];
                     Property dependentProp = properties.Find(x => x.m_Name == curDependency.m_PropertyFunctionOf);
-					NativeArray<float> normalDistrib = new NativeArray<float>(BucketSize * 2, Allocator.TempJob);
-					m_ToDispose.Add(normalDistrib);
-					float stdDev = Mathf.Max(Epsilon, curDependency.m_StdDev);
-                    for (int i = 0; i < BucketSize * 2; ++i)
-                        normalDistrib[i] = 0;
-                    for (int i = 0; i < BucketSize * 2; ++i)
-                    {
-                        float cdfSamplingCursor = _BucketIdxToValue(i) - 1.0f;
-                        float distrib = _CumulativeDistributionFunction(0.0f, stdDev, cdfSamplingCursor);
-                        normalDistrib[i] = distrib;
-                    }
-                    float invNormalPDFRangeToZero = _InverseNormalPDFSize(Epsilon, stdDev);
-
 					for (int i = 0; i < JobCount; ++i)
 					{
 						DependencyNormalDistribParallel job = new DependencyNormalDistribParallel();
 						job.m_PrecomputedDependencyCurve = curDependency.m_PrecomputeCurve;
 						job.m_DependencyPopulationDistrib = dependentProp.m_PopulationDistribNative;
-						job.m_PrecomputedNormalDistribution = normalDistrib;
-						job.m_PopulationCount = populationCount;
+						job.m_PrecomputedNormalDistribution = curDependency.m_PrecomputeNormalDistribution;
+						job.m_PrecomputedNormalDistributionSum = curDependency.m_PrecomputeNormalDistributionSum;
+						job.m_PopulationCount = (float)populationCount;
+						job.m_InvNormalPDFRangeToZero = _InverseNormalPDFSize(Epsilon, Mathf.Max(Epsilon, curDependency.m_StdDev));
 						job.m_CurPropertyPopulationDistrib = m_NewPopulationDistrib;
-						job.m_InvNormalPDFRangeToZero = _InverseNormalPDFSize(Epsilon, stdDev);
 						job.m_StartIdx = i * (BucketSize / JobCount);
 						job.m_StopIdx = i + 1 == JobCount ? BucketSize : (i + 1) * (BucketSize / JobCount);
 						job.m_OutputDistribution = m_ParallelDistrib.Slice(i * BucketSize, BucketSize);
@@ -476,14 +486,14 @@ public class MainSimulation : MonoBehaviour
 						job.m_JobOutputs = m_ParallelDistrib;
 						job.m_FinalOutput = m_NewPopulationDistrib;
 						lastJobDependency = job.Schedule(JobHandle.CombineDependencies(handles));
+						// lastJobDependency.Complete();
 					}
-					// workingBuffer.CopyTo(newDistribution);
 				}
 				handles.Dispose();
 			}
 			return lastJobDependency;
 		}
-        public void PostEvaluateChange()
+        public void PostEvaluateChange(uint populationCount)
         {
             s_SimulatePerfMarker.Begin();
 			if (m_Dependencies.Count != 0)
@@ -491,15 +501,12 @@ public class MainSimulation : MonoBehaviour
 				float   popCount = 0.0f;
 				for (int i = 0; i < BucketSize; ++i)
 					popCount += m_NewPopulationDistrib[i];
-				// assert ...
-				foreach (NativeArray<float> buff in m_ToDispose)
-					buff.Dispose();
-				m_ToDispose.Clear();
+				Debug.Assert(Mathf.Abs(popCount - (float)populationCount) < 0.5f);
 				m_PopulationDistribNative.CopyFrom(m_NewPopulationDistrib);
 				for (int i = 0; i < BucketSize; ++i)
 					m_NewPopulationDistrib[i] = 0;
 				m_PopulationDistrib2.m_CurveOutput = m_PopulationDistribNative;
-				m_PopulationDistrib2.Update();
+				m_PopulationDistrib2.Update(populationCount);
 				m_PopulationDistrib2.m_CurrentPopulationDistrib.CopyTo(m_PopulationDistrib);
 				m_PopulationDistrib2.m_CurrentPopulationDistrib.CopyTo(m_PopulationDistribNative);
 			}
@@ -618,13 +625,13 @@ public class MainSimulation : MonoBehaviour
         SimulationProperty populationCount = m_SimulationProperties.Find(x => x.m_Name == "PopulationCount");
         // Initialize Agents Distribution
         for (int i = 0; i < m_AgentProperties.Count; ++i)
-            m_AgentProperties[i].Initialize(populationCount.m_Value);
+            m_AgentProperties[i].Initialize((uint)populationCount.m_Value);
         Property age = m_AgentProperties.Find(x => x.m_Name == "Age");
         m_PreviousAges = new float[BucketSize];
         m_NextAges = new float[BucketSize];
 
         for (int i = 0; i < BucketSize; ++i)
-            m_PreviousAges[i] = age.m_PopulationDistrib[i];
+            m_PreviousAges[i] = age.m_PopulationDistribNative[i];
         Array.Copy(m_PreviousAges, 0, m_NextAges, 1, BucketSize - 1);
         m_NextAges[0] = 0;
     }
@@ -680,12 +687,12 @@ public class MainSimulation : MonoBehaviour
                 JobHandle handle;
                 if (updatePriority[idxToUpdate[i]] == 1) // Meaning there is only the age as dependency
                 {
-                    handle = m_AgentProperties[idxToUpdate[i]].EvaluateChange(m_AgentProperties, populationCount.m_Value);
+                    handle = m_AgentProperties[idxToUpdate[i]].EvaluateChange(m_AgentProperties, (uint)populationCount.m_Value);
                     jobs.Add(handle);
 				}
 				else
                 {
-					handle = m_AgentProperties[idxToUpdate[i]].EvaluateChange(m_AgentProperties, populationCount.m_Value, jobs[jobs.Count - 1]);
+					handle = m_AgentProperties[idxToUpdate[i]].EvaluateChange(m_AgentProperties, (uint)populationCount.m_Value, jobs[jobs.Count - 1]);
 					jobs[jobs.Count - 1] = handle;
 				}
 
@@ -697,7 +704,7 @@ public class MainSimulation : MonoBehaviour
 		{
 			if (updatePriority[idxToUpdate[i]] > 0)
 			{
-				m_AgentProperties[idxToUpdate[i]].PostEvaluateChange();
+				m_AgentProperties[idxToUpdate[i]].PostEvaluateChange((uint)populationCount.m_Value);
 			}
 		}
 	}

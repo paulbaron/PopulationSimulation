@@ -23,7 +23,7 @@ public class MainSimulationEditor : Editor
     {
     }
 
-    private void DrawAgentPropertyDistribution(float[] rawValues)
+    private void DrawAgentPropertyDistribution(float[] rawValues, float drawScale)
     {
         AnimationCurve animationCurve = new AnimationCurve();
         Keyframe[] keyframes = new Keyframe[rawValues.Length];
@@ -33,10 +33,10 @@ public class MainSimulationEditor : Editor
             float current = rawValues[i];
             float prev = i == 0 ? current : rawValues[i - 1];
             float next = i + 1 == keyframes.Length ? current : rawValues[i + 1];
-            keyframes[i].time = (float)i / (rawValues.Length - 1);
+            keyframes[i].time = (float)i / (rawValues.Length - 1) * drawScale;
             keyframes[i].value = current;
-            keyframes[i].inTangent = (current - prev) * rawValues.Length;
-            keyframes[i].outTangent = (next - current) * rawValues.Length;
+            keyframes[i].inTangent = ((current - prev) * rawValues.Length) / drawScale;
+            keyframes[i].outTangent = ((next - current) * rawValues.Length) / drawScale;
         }
         animationCurve.keys = keyframes;
         EditorGUILayout.CurveField(animationCurve);
@@ -99,11 +99,13 @@ public class MainSimulationEditor : Editor
 
                 SerializedProperty agentPropertyDistrib = agentProperty.FindPropertyRelative("m_PopulationDistrib");
 
-                SerializedProperty agentPropertyInit = agentProperty.FindPropertyRelative("m_Initialization");
-                SerializedProperty agentPropertyValue = agentProperty.FindPropertyRelative("m_InitializationValue");
-                SerializedProperty agentPropertyStdDev = agentProperty.FindPropertyRelative("m_InitializationStdDev");
-                EditorGUILayout.PropertyField(agentPropertyInit);
-                if (agentPropertyInit.enumValueIndex == ((int)MainSimulation.InitializationFunctions.ConstantValue))
+				SerializedProperty agentPropertyDrawScale = agentProperty.FindPropertyRelative("m_DrawScale");
+				SerializedProperty agentPropertyInit = agentProperty.FindPropertyRelative("m_Initialization");
+				SerializedProperty agentPropertyValue = agentProperty.FindPropertyRelative("m_InitializationValue");
+				SerializedProperty agentPropertyStdDev = agentProperty.FindPropertyRelative("m_InitializationStdDev");
+				EditorGUILayout.PropertyField(agentPropertyDrawScale);
+				EditorGUILayout.PropertyField(agentPropertyInit);
+				if (agentPropertyInit.enumValueIndex == ((int)MainSimulation.InitializationFunctions.ConstantValue))
                 {
                     EditorGUILayout.PropertyField(agentPropertyValue);
                 }
@@ -122,7 +124,7 @@ public class MainSimulationEditor : Editor
                 float[] rawValue = new float[MainSimulation.BucketSize];
                 for (int j = 0; j < MainSimulation.BucketSize; ++j)
                     rawValue[j] = agentPropertyDistrib.GetArrayElementAtIndex(j).floatValue;
-                DrawAgentPropertyDistribution(rawValue);
+                DrawAgentPropertyDistribution(rawValue, agentPropertyDrawScale.floatValue);
 
                 SerializedProperty agentPropertyDependencies = agentProperty.FindPropertyRelative("m_Dependencies");
                 DrawAgentPropertiesDependencies(agentPropertyDependencies);
